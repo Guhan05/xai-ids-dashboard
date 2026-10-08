@@ -30,17 +30,18 @@ st.divider()
 # ---------------------------------------------------------
 @st.cache_resource
 def load_artifacts():
-    data_path = "assets/dashboard_demo_data.npz"
-    dnn_path = "assets/dashboard_dnn.keras"
-    ae_path = "assets/dashboard_ae.keras"
-    thresh_path = "assets/dashboard_threshold.pkl"
-    csv_path = "assets/xai_consensus_results.csv"
+    # Updated paths to point to the root directory
+    data_path = "dashboard_demo_data.npz"
+    dnn_path = "dashboard_dnn.keras"
+    ae_path = "dashboard_ae.keras"
+    thresh_path = "dashboard_threshold.pkl"
+    csv_path = "xai_consensus_results.csv"
 
     # Verify asset existence
     required_files = [data_path, dnn_path, ae_path, thresh_path, csv_path]
     for f in required_files:
         if not os.path.exists(f):
-            st.error(f"Missing required artifact: `{f}`. Please copy all exported files into the `assets/` directory.")
+            st.error(f"Missing required artifact: `{f}`.")
             st.stop()
 
     demo_data = np.load(data_path)
@@ -54,7 +55,7 @@ def load_artifacts():
     xai_df = pd.read_csv(csv_path)
 
     return X_demo, y_demo, source_demo, dnn_model, ae_model, threshold, xai_df
-
+    
 X_demo, y_demo, source_demo, dnn_model, ae_model, threshold, xai_df = load_artifacts()
 
 # Compute predictions for all demo samples
