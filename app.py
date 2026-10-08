@@ -1,176 +1,204 @@
-"""
-XAI-IDS — Live SOC Dashboard (Skeleton)
-========================================
-Simulates real-time traffic by replaying pre-processed flow records through
-the fast detection path (autoencoder anomaly gate + DNN classifier) at a
-controlled rate, showing per-flow latency and running verdict counts as if
-watching a live feed.
-
-This is deliberately a SKELETON: SHAP/LIME explanation, the consensus score,
-and fuzzy criticality scoring (Phases 5-7) are not built yet, so flagged
-instances show an "explanation pending" placeholder instead of a real
-explanation. That placeholder is not a cosmetic stand-in — it's the actual
-architecture: detection is synchronous (you'll see it happen instantly per
-flow), explanation is asynchronous by design and will fill in this same slot
-once Phase 5 exists, without changing this file's structure.
-
-Run locally:   pip install streamlit tensorflow numpy pandas joblib
-               streamlit run app.py
-Or deploy free on Streamlit Community Cloud by pushing this file + the
-four exported artifacts (dashboard_dnn.keras, dashboard_ae.keras,
-dashboard_threshold.pkl, dashboard_demo_data.npz) to a GitHub repo.
-"""
-
-import time
+import streamlit as st
 import numpy as np
 import pandas as pd
-import joblib
-import streamlit as st
 import tensorflow as tf
+import joblib
+import plotly.express as px
+import plotly.graph_objects as go
+import os
 
-st.set_page_config(page_title="XAI-IDS — Live SOC Dashboard", layout="wide")
-
-DATA_PATH = "dashboard_demo_data.npz"
-DNN_PATH = "dashboard_dnn.keras"
-AE_PATH = "dashboard_ae.keras"
-THRESHOLD_PATH = "dashboard_threshold.pkl"
-
-
-@st.cache_resource
-def load_models():
-    dnn = tf.keras.models.load_model(DNN_PATH)
-    ae = tf.keras.models.load_model(AE_PATH)
-    threshold = joblib.load(THRESHOLD_PATH)
-    return dnn, ae, threshold
-
-
-@st.cache_data
-def load_demo_data():
-    d = np.load(DATA_PATH, allow_pickle=True)
-    return d["X"], d["y"], d["source"]
-
-
-def reconstruction_error(model, X_row):
-    recon = model.predict(X_row, verbose=0)
-    return float(np.mean(np.square(X_row - recon)))
-
-
-def classify_flow(ae, dnn, threshold, x_row):
-    """Runs the synchronous fast path on a single flow. Returns verdict + timing."""
-    x_row = x_row.reshape(1, -1)
-    t0 = time.perf_counter()
-
-    error = reconstruction_error(ae, x_row)
-    is_anomalous = error > threshold
-
-    proba = float(dnn.predict(x_row, verbose=0).ravel()[0])
-    is_known_attack = proba > 0.5
-
-    if is_known_attack:
-        verdict = "known_attack"
-    elif is_anomalous:
-        verdict = "zero_day_candidate"
-    else:
-        verdict = "benign"
-
-    latency_ms = (time.perf_counter() - t0) * 1000
-    return verdict, error, proba, latency_ms
-
-
-VERDICT_COLOR = {
-    "benign": "🟢",
-    "known_attack": "🟠",
-    "zero_day_candidate": "🔴",
-}
-
-
-def explanation_placeholder(verdict):
-    if verdict == "benign":
-        return "—"
-    return "⏳ Queued for SHAP/LIME (Phase 5)"
-
-
-# ---------------- Sidebar controls ----------------
-st.sidebar.header("Replay Controls")
-n_flows = st.sidebar.slider("Flows to replay", min_value=10, max_value=347, value=100)
-delay = st.sidebar.slider("Delay per flow (seconds)", min_value=0.0, max_value=1.0, value=0.15, step=0.05)
-start = st.sidebar.button("▶ Start Replay", type="primary")
-st.sidebar.caption(
-    "Simulates a live traffic stream by replaying stored flows at a controlled rate. "
-    "Detection (autoencoder + DNN) runs synchronously per flow, matching the fast-path "
-    "design — explanation generation is intentionally deferred to a later phase."
+# Set Streamlit Page Configuration
+st.set_page_config(
+    page_title="XAI Multi-Stage IDS Dashboard",
+    page_icon="🛡️",
+    layout="wide"
 )
 
-st.title("🛡️ XAI-IDS — Live SOC Dashboard")
-st.caption("Fast-path detection running in simulated real time. Explanation layer: not yet built (Phase 5).")
+# Title & Description
+st.title("🛡️ XAI-Driven Multi-Stage Intrusion Detection System")
+st.markdown("""
+This dashboard monitors network traffic flows using a **Cascade Architecture**:
+1. **Autoencoder (AE):** Detects zero-day anomaly candidates based on reconstruction error cutoffs.
+2. **Deep Neural Network (DNN):** Classifies known attack vectors.
+3. **Dual-Engine XAI (SHAP + LIME):** Evaluates explanation consensus to enforce safe, automated response gating.
+""")
 
-try:
-    dnn_model, ae_model, threshold = load_models()
-    X_demo, y_demo, source_demo = load_demo_data()
-    models_ok = True
-except Exception as e:
-    models_ok = False
-    st.error(
-        "Couldn't load model/data files. Make sure dashboard_dnn.keras, dashboard_ae.keras, "
-        "dashboard_threshold.pkl, and dashboard_demo_data.npz are in the same folder as this "
-        f"script.\n\nDetails: {e}"
+st.divider()
+
+# ---------------------------------------------------------
+# 1. Load Data and Artifacts
+# ---------------------------------------------------------
+@st.cache_resource
+def load_artifacts():
+    data_path = "assets/dashboard_demo_data.npz"
+    dnn_path = "assets/dashboard_dnn.keras"
+    ae_path = "assets/dashboard_ae.keras"
+    thresh_path = "assets/dashboard_threshold.pkl"
+    csv_path = "assets/xai_consensus_results.csv"
+
+    # Verify asset existence
+    required_files = [data_path, dnn_path, ae_path, thresh_path, csv_path]
+    for f in required_files:
+        if not os.path.exists(f):
+            st.error(f"Missing required artifact: `{f}`. Please copy all exported files into the `assets/` directory.")
+            st.stop()
+
+    demo_data = np.load(data_path)
+    X_demo = demo_data["X"]
+    y_demo = demo_data["y"]
+    source_demo = demo_data["source"]
+
+    dnn_model = tf.keras.models.load_model(dnn_path)
+    ae_model = tf.keras.models.load_model(ae_path)
+    threshold = joblib.load(thresh_path)
+    xai_df = pd.read_csv(csv_path)
+
+    return X_demo, y_demo, source_demo, dnn_model, ae_model, threshold, xai_df
+
+X_demo, y_demo, source_demo, dnn_model, ae_model, threshold, xai_df = load_artifacts()
+
+# Compute predictions for all demo samples
+recon_errors = np.mean(np.square(X_demo - ae_model.predict(X_demo, verbose=0)), axis=1)
+dnn_probs = dnn_model.predict(X_demo, verbose=0).ravel()
+
+verdicts = np.full(X_demo.shape[0], "Benign", dtype=object)
+verdicts[dnn_probs > 0.5] = "Known Attack"
+verdicts[(recon_errors > threshold) & (dnn_probs <= 0.5)] = "Zero-Day Candidate"
+
+# ---------------------------------------------------------
+# 2. Executive Metrics Panel
+# ---------------------------------------------------------
+col1, col2, col3, col4 = st.columns(4)
+
+total_flows = len(X_demo)
+benign_cnt = np.sum(verdicts == "Benign")
+known_cnt = np.sum(verdicts == "Known Attack")
+zero_day_cnt = np.sum(verdicts == "Zero-Day Candidate")
+
+col1.metric("Total Analyzed Flows", f"{total_flows:,}")
+col2.metric("Benign Flows", f"{benign_cnt:,}", delta="Normal", delta_color="normal")
+col3.metric("Known Attacks (DNN)", f"{known_cnt:,}", delta="Alert", delta_color="inverse")
+col4.metric("Zero-Day Candidates (AE)", f"{zero_day_cnt:,}", delta="Critical", delta_color="inverse")
+
+st.divider()
+
+# ---------------------------------------------------------
+# 3. Anomaly Threshold & Traffic Overview Plots
+# ---------------------------------------------------------
+c_left, c_right = st.columns([1, 1])
+
+with c_left:
+    st.subheader("📊 Traffic Verdict Distribution")
+    verdict_df = pd.DataFrame({"Verdict": verdicts}).value_counts().reset_index()
+    verdict_df.columns = ["Verdict", "Count"]
+    
+    fig_pie = px.pie(
+        verdict_df, 
+        names="Verdict", 
+        values="Count", 
+        color="Verdict",
+        color_discrete_map={
+            "Benign": "#2ecc71",
+            "Known Attack": "#e74c3c",
+            "Zero-Day Candidate": "#f39c12"
+        },
+        hole=0.4
     )
+    st.plotly_chart(fig_pie, use_container_width=True)
 
-if models_ok:
-    metric_cols = st.columns(4)
-    benign_metric = metric_cols[0].empty()
-    known_metric = metric_cols[1].empty()
-    zeroday_metric = metric_cols[2].empty()
-    latency_metric = metric_cols[3].empty()
+with c_right:
+    st.subheader("📉 Autoencoder Reconstruction Error vs. Cutoff")
+    fig_scatter = go.Figure()
+    fig_scatter.add_trace(go.Scatter(
+        y=recon_errors,
+        mode='markers',
+        marker=dict(color=np.where(recon_errors > threshold, '#e74c3c', '#3498db'), size=6),
+        name="Flow Error"
+    ))
+    fig_scatter.add_hline(
+        y=threshold, 
+        line_dash="dash", 
+        line_color="orange", 
+        annotation_text=f"Cutoff Threshold: {threshold:.4f}",
+        annotation_position="bottom right"
+    )
+    fig_scatter.update_layout(
+        xaxis_title="Flow Sample Index",
+        yaxis_title="MSE Reconstruction Error",
+        template="plotly_white"
+    )
+    st.plotly_chart(fig_scatter, use_container_width=True)
 
-    table_placeholder = st.empty()
-    summary_placeholder = st.container()
+st.divider()
 
-    if start:
-        log = []
-        n_flows = min(n_flows, len(X_demo))
+# ---------------------------------------------------------
+# 4. Phase 5: XAI Consensus & Gating Inspector
+# ---------------------------------------------------------
+st.subheader("🔍 Dual-Engine XAI Consensus & Gating Inspector")
 
-        for i in range(n_flows):
-            x_row = X_demo[i]
-            true_label = "attack" if y_demo[i] == 1 else "benign"
-            source = source_demo[i]
+if xai_df.empty:
+    st.info("No flagged XAI evaluation records found.")
+else:
+    sample_ids = xai_df["sample_id"].tolist()
+    selected_id = st.selectbox("Select Flagged Sample ID for Analysis:", sample_ids)
 
-            verdict, error, proba, latency_ms = classify_flow(ae_model, dnn_model, threshold, x_row)
+    # Filter data for selected sample
+    sample_row = xai_df[xai_df["sample_id"] == selected_id].iloc[0]
 
-            log.append({
-                "Flow #": i + 1,
-                "Source": source,
-                "Verdict": f"{VERDICT_COLOR[verdict]} {verdict}",
-                "Recon. Error": round(error, 5),
-                "DNN P(attack)": round(proba, 4),
-                "Latency (ms)": round(latency_ms, 2),
-                "Explanation": explanation_placeholder(verdict),
-                "Ground Truth": true_label,
-            })
+    meta_col1, meta_col2, meta_col3, meta_col4 = st.columns(4)
+    meta_col1.markdown(f"**Source Group:** `{sample_row['source']}`")
+    meta_col2.markdown(f"**Cascade Verdict:** `{sample_row['verdict']}`")
+    meta_col3.markdown(f"**Consensus Score:** `{sample_row['consensus_score']:.4f}`")
 
-            log_df = pd.DataFrame(log)
-            counts = log_df["Verdict"].str.contains
-            benign_metric.metric("🟢 Benign", int(counts("benign").sum()))
-            known_metric.metric("🟠 Known Attack", int(counts("known_attack").sum()))
-            zeroday_metric.metric("🔴 Zero-Day Candidate", int(counts("zero_day_candidate").sum()))
-            latency_metric.metric("Avg Latency", f"{log_df['Latency (ms)'].mean():.2f} ms")
-
-            table_placeholder.dataframe(
-                log_df.iloc[::-1].head(20), use_container_width=True, hide_index=True
-            )
-            time.sleep(delay)
-
-        with summary_placeholder:
-            st.divider()
-            st.subheader("Replay Summary")
-            zd_rows = log_df[log_df["Source"] == "zero_day_holdout"]
-            if len(zd_rows) > 0:
-                caught = zd_rows["Verdict"].str.contains("zero_day_candidate").sum() + \
-                         zd_rows["Verdict"].str.contains("known_attack").sum()
-                st.write(
-                    f"Of {len(zd_rows)} true zero-day flows replayed, **{caught} "
-                    f"({100*caught/len(zd_rows):.1f}%)** were flagged by some stage of the cascade."
-                )
-            st.write(f"Average end-to-end detection latency: **{log_df['Latency (ms)'].mean():.2f} ms/flow**")
+    # Dynamic Gating Badge
+    action = sample_row["response_action"]
+    if action == "AUTOMATED_MITIGATION":
+        meta_col4.error("🛡️ Action: AUTOMATED MITIGATION")
     else:
-        st.info("Set your replay parameters in the sidebar, then click **Start Replay**.")
+        meta_col4.warning("⚠️ Action: HUMAN ANALYST REVIEW")
+
+    st.markdown("### Top Feature Attributions (SHAP vs. LIME)")
+    
+    # Format feature strings safely
+    shap_feats = sample_row["top_shap_features"]
+    lime_feats = sample_row["top_lime_features"]
+    
+    if isinstance(shap_feats, str):
+        shap_feats = eval(shap_feats)
+    if isinstance(lime_feats, str):
+        lime_feats = eval(lime_feats)
+
+    f_col1, f_col2 = st.columns(2)
+    
+    with f_col1:
+        st.markdown("**SHAP (Global/Sampling-based) Top Features:**")
+        for i, feat in enumerate(shap_feats, 1):
+            st.markdown(f"{i}. `{feat}`")
+
+    with f_col2:
+        st.markdown("**LIME (Local Linear Surrogate) Top Features:**")
+        for i, feat in enumerate(lime_feats, 1):
+            st.markdown(f"{i}. `{feat}`")
+
+    # Consensus Gauge Chart
+    fig_gauge = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=sample_row["consensus_score"],
+        domain={'x': [0, 1], 'y': [0, 1]},
+        title={'text': "SHAP-LIME Explanation Consensus Score"},
+        gauge={
+            'axis': {'range': [0, 1]},
+            'bar': {'color': "#2980b9"},
+            'steps': [
+                {'range': [0, 0.70], 'color': "#f1c40f"},
+                {'range': [0.70, 1.0], 'color': "#2ecc71"}
+            ],
+            'threshold': {
+                'line': {'color': "red", 'width': 4},
+                'thickness': 0.75,
+                'value': 0.70
+            }
+        }
+    ))
+    fig_gauge.update_layout(height=300)
+    st.plotly_chart(fig_gauge, use_container_width=True)
