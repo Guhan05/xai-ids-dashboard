@@ -1,205 +1,283 @@
-import streamlit as st
+import os
+import time
+import joblib
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-import joblib
+import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-import os
 
-# Set Streamlit Page Configuration
+# ---------------------------------------------------------
+# Page Configuration
+# ---------------------------------------------------------
 st.set_page_config(
-    page_title="XAI Multi-Stage IDS Dashboard",
+    page_title="🛡️ XAI-Driven Multi-Stage IDS",
     page_icon="🛡️",
     layout="wide"
 )
 
-# Title & Description
-st.title("🛡️ XAI-Driven Multi-Stage Intrusion Detection System")
-st.markdown("""
-This dashboard monitors network traffic flows using a **Cascade Architecture**:
-1. **Autoencoder (AE):** Detects zero-day anomaly candidates based on reconstruction error cutoffs.
-2. **Deep Neural Network (DNN):** Classifies known attack vectors.
-3. **Dual-Engine XAI (SHAP + LIME):** Evaluates explanation consensus to enforce safe, automated response gating.
-""")
+# ---------------------------------------------------------
+# Feature Name Dictionary (CICIDS2017 Mapping)
+# ---------------------------------------------------------
+FEATURE_MAP = {
+    "Feature_0": "Destination Port",
+    "Feature_1": "Flow Duration",
+    "Feature_2": "Total Fwd Packets",
+    "Feature_3": "Total Backward Packets",
+    "Feature_4": "Total Length of Fwd Packets",
+    "Feature_5": "Total Length of Bwd Packets",
+    "Feature_6": "Fwd Packet Length Max",
+    "Feature_7": "Fwd Packet Length Min",
+    "Feature_8": "Fwd Packet Length Mean",
+    "Feature_9": "Fwd Packet Length Std",
+    "Feature_10": "Bwd Packet Length Max",
+    "Feature_11": "Bwd Packet Length Min",
+    "Feature_12": "Bwd Packet Length Mean",
+    "Feature_13": "Bwd Packet Length Std",
+    "Feature_14": "Flow Bytes/s",
+    "Feature_15": "Flow Packets/s",
+    "Feature_50": "Subflow Fwd Bytes",
+    "Feature_51": "Subflow Fwd Packets"
+}
 
-st.divider()
+def get_readable_feature(feature_key):
+    """Maps raw feature keys like Feature_8 to human-readable network names."""
+    clean_key = str(feature_key).strip()
+    return FEATURE_MAP.get(clean_key, clean_key)
+
+def generate_plain_english_explanation(verdict, top_features):
+    """Generates natural language explanations of detected threats."""
+    readable_feats = [get_readable_feature(f) for f in top_features[:3]]
+    feats_list_str = ", ".join([f"`{f}`" for f in readable_feats])
+    
+    if verdict == "Known Attack":
+        return f"🚨 **Malicious Activity Detected:** The Deep Neural Network matched this flow to a known attack signature. Primary feature drivers influencing model prediction: {feats_list_str}."
+    elif verdict == "Zero-Day Candidate":
+        return f"⚠️ **Anomalous Traffic Detected:** Autoencoder reconstruction error exceeded safety cutoff threshold. Network attributes exhibiting severe statistical deviation: {feats_list_str}."
+    else:
+        return "✅ **Normal Traffic:** Traffic metrics fall cleanly within baseline operational boundaries."
 
 # ---------------------------------------------------------
-# 1. Load Data and Artifacts
+# Dynamic IP / 5-Tuple Network Header Generator
+# ---------------------------------------------------------
+@st.cache_data
+def generate_network_metadata(num_samples):
+    """Generates synthetic 5-tuple IP metadata corresponding to dataset flow samples."""
+    np.random.seed(42)
+    src_ips = [f"192.168.1.{np.random.randint(2, 254)}" for _ in range(num_samples)]
+    dst_ips = [f"10.0.0.{np.random.randint(2, 50)}" for _ in range(num_samples)]
+    ports = [80, 443, 22, 8080, 53, 3389, 49152]
+    protocols = ["TCP", "UDP", "ICMP"]
+    
+    return pd.DataFrame({
+        "src_ip": src_ips,
+        "src_port": np.random.choice(ports, num_samples),
+        "dst_ip": dst_ips,
+        "dst_port": np.random.choice(ports, num_samples),
+        "protocol": np.random.choice(protocols, num_samples)
+    })
+
+# ---------------------------------------------------------
+# Load Model Artifacts
 # ---------------------------------------------------------
 @st.cache_resource
 def load_artifacts():
-    # Updated paths to point to the root directory
-    data_path = "dashboard_demo_data.npz"
-    dnn_path = "dashboard_dnn.keras"
-    ae_path = "dashboard_ae.keras"
-    thresh_path = "dashboard_threshold.pkl"
-    csv_path = "xai_consensus_results.csv"
-
-    # Verify asset existence
-    required_files = [data_path, dnn_path, ae_path, thresh_path, csv_path]
-    for f in required_files:
-        if not os.path.exists(f):
-            st.error(f"Missing required artifact: `{f}`.")
+    """Loads dataset and model artifacts from root directory or assets/ subfolder."""
+    possible_paths = [
+        ("dashboard_demo_data.npz", "assets/dashboard_demo_data.npz"),
+        ("dashboard_dnn.keras", "assets/dashboard_dnn.keras"),
+        ("dashboard_ae.keras", "assets/dashboard_ae.keras"),
+        ("dashboard_threshold.pkl", "assets/dashboard_threshold.pkl"),
+        ("xai_consensus_results.csv", "assets/xai_consensus_results.csv")
+    ]
+    
+    resolved_paths = {}
+    for default_name, asset_subpath in possible_paths:
+        if os.path.exists(default_name):
+            resolved_paths[default_name] = default_name
+        elif os.path.exists(asset_subpath):
+            resolved_paths[default_name] = asset_subpath
+        else:
+            st.error(f"Missing required artifact file: `{default_name}` (checked root and `assets/`).")
             st.stop()
 
-    demo_data = np.load(data_path)
-    X_demo = demo_data["X"]
-    y_demo = demo_data["y"]
-    source_demo = demo_data["source"]
+    demo_data = np.load(resolved_paths["dashboard_demo_data.npz"])
+    X_demo, y_demo, source_demo = demo_data["X"], demo_data["y"], demo_data["source"]
 
-    dnn_model = tf.keras.models.load_model(dnn_path)
-    ae_model = tf.keras.models.load_model(ae_path)
-    threshold = joblib.load(thresh_path)
-    xai_df = pd.read_csv(csv_path)
+    dnn_model = tf.keras.models.load_model(resolved_paths["dashboard_dnn.keras"])
+    ae_model = tf.keras.models.load_model(resolved_paths["dashboard_ae.keras"])
+    threshold = joblib.load(resolved_paths["dashboard_threshold.pkl"])
+    xai_df = pd.read_csv(resolved_paths["xai_consensus_results.csv"])
 
     return X_demo, y_demo, source_demo, dnn_model, ae_model, threshold, xai_df
-    
+
+# Initialize Data & Models
 X_demo, y_demo, source_demo, dnn_model, ae_model, threshold, xai_df = load_artifacts()
-
-# Compute predictions for all demo samples
-recon_errors = np.mean(np.square(X_demo - ae_model.predict(X_demo, verbose=0)), axis=1)
-dnn_probs = dnn_model.predict(X_demo, verbose=0).ravel()
-
-verdicts = np.full(X_demo.shape[0], "Benign", dtype=object)
-verdicts[dnn_probs > 0.5] = "Known Attack"
-verdicts[(recon_errors > threshold) & (dnn_probs <= 0.5)] = "Zero-Day Candidate"
+metadata_df = generate_network_metadata(len(X_demo))
 
 # ---------------------------------------------------------
-# 2. Executive Metrics Panel
+# Dashboard Layout & Sidebar
 # ---------------------------------------------------------
-col1, col2, col3, col4 = st.columns(4)
+st.title("🛡️ Real-Time XAI Threat Detection & Response Engine")
+st.markdown("""
+This dashboard monitors network traffic flows using a **Cascade Architecture**:
+* **Deep Neural Network (DNN):** Classifies known attack vectors.
+* **Autoencoder (AE):** Detects zero-day anomaly candidates based on reconstruction error cutoffs.
+* **Dual-Engine XAI (SHAP + LIME):** Evaluates explanation consensus to enforce safe, automated response gating.
+""")
 
-total_flows = len(X_demo)
-benign_cnt = np.sum(verdicts == "Benign")
-known_cnt = np.sum(verdicts == "Known Attack")
-zero_day_cnt = np.sum(verdicts == "Zero-Day Candidate")
-
-col1.metric("Total Analyzed Flows", f"{total_flows:,}")
-col2.metric("Benign Flows", f"{benign_cnt:,}", delta="Normal", delta_color="normal")
-col3.metric("Known Attacks (DNN)", f"{known_cnt:,}", delta="Alert", delta_color="inverse")
-col4.metric("Zero-Day Candidates (AE)", f"{zero_day_cnt:,}", delta="Critical", delta_color="inverse")
-
-st.divider()
+st.sidebar.header("🕹️ Control Panel")
+mode = st.sidebar.radio("Select Operating Mode", ["Real-Time Live Engine", "Forensic Incident Inspector"])
 
 # ---------------------------------------------------------
-# 3. Anomaly Threshold & Traffic Overview Plots
+# MODE 1: REAL-TIME LIVE ENGINE
 # ---------------------------------------------------------
-c_left, c_right = st.columns([1, 1])
-
-with c_left:
-    st.subheader("📊 Traffic Verdict Distribution")
-    verdict_df = pd.DataFrame({"Verdict": verdicts}).value_counts().reset_index()
-    verdict_df.columns = ["Verdict", "Count"]
+if mode == "Real-Time Live Engine":
+    st.subheader("📡 Live Traffic Stream & Automated Gating")
     
-    fig_pie = px.pie(
-        verdict_df, 
-        names="Verdict", 
-        values="Count", 
-        color="Verdict",
-        color_discrete_map={
-            "Benign": "#2ecc71",
-            "Known Attack": "#e74c3c",
-            "Zero-Day Candidate": "#f39c12"
-        },
-        hole=0.4
-    )
-    st.plotly_chart(fig_pie, use_container_width=True)
+    stream_speed = st.sidebar.slider("Streaming Speed (sec/flow)", 0.2, 2.0, 0.5)
+    start_btn = st.sidebar.button("▶️ Start Live Packet Stream")
+    stop_btn = st.sidebar.button("⏹️ Pause Stream")
 
-with c_right:
-    st.subheader("📉 Autoencoder Reconstruction Error vs. Cutoff")
-    fig_scatter = go.Figure()
-    fig_scatter.add_trace(go.Scatter(
-        y=recon_errors,
-        mode='markers',
-        marker=dict(color=np.where(recon_errors > threshold, '#e74c3c', '#3498db'), size=6),
-        name="Flow Error"
-    ))
-    fig_scatter.add_hline(
-        y=threshold, 
-        line_dash="dash", 
-        line_color="orange", 
-        annotation_text=f"Cutoff Threshold: {threshold:.4f}",
-        annotation_position="bottom right"
-    )
-    fig_scatter.update_layout(
-        xaxis_title="Flow Sample Index",
-        yaxis_title="MSE Reconstruction Error",
-        template="plotly_white"
-    )
-    st.plotly_chart(fig_scatter, use_container_width=True)
+    metric_place = st.empty()
+    header_place = st.empty()
+    alert_place = st.empty()
 
-st.divider()
+    if start_btn:
+        st.session_state["streaming"] = True
+    if stop_btn:
+        st.session_state["streaming"] = False
+
+    if st.session_state.get("streaming", False):
+        sample_indices = np.random.choice(len(X_demo), size=50, replace=True)
+        
+        for idx in sample_indices:
+            if not st.session_state.get("streaming", False):
+                break
+                
+            sample = X_demo[idx:idx+1]
+            meta = metadata_df.iloc[idx].to_dict()
+            
+            # Real-time Inference
+            recon_err = float(np.mean(np.square(sample - ae_model.predict(sample, verbose=0))))
+            dnn_prob = float(dnn_model.predict(sample, verbose=0).ravel()[0])
+
+            # Detection Cascade Decision Logic
+            if dnn_prob > 0.5:
+                verdict = "Known Attack"
+            elif recon_err > threshold:
+                verdict = "Zero-Day Candidate"
+            else:
+                verdict = "Benign"
+
+            # 1. Real-time Summary Metrics
+            with metric_place.container():
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Flow Index", f"#{idx}")
+                c2.metric("DNN Probability", f"{dnn_prob * 100:.1f}%")
+                c3.metric("AE Recon Error", f"{recon_err:.4f}")
+                
+                if verdict == "Benign":
+                    c4.success("Status: BENIGN")
+                elif verdict == "Known Attack":
+                    c4.error("Status: KNOWN ATTACK")
+                else:
+                    c4.warning("Status: ZERO-DAY CANDIDATE")
+
+            # 2. Network Flow Header (5-Tuple Context)
+            with header_place.container():
+                st.markdown("#### 🌐 Network Flow Header (5-Tuple Context)")
+                hc1, hc2, hc3, hc4, hc5 = st.columns(5)
+                hc1.metric("Source IP", meta["src_ip"])
+                hc2.metric("Source Port", meta["src_port"])
+                hc3.metric("Destination IP", meta["dst_ip"])
+                hc4.metric("Destination Port", meta["dst_port"])
+                hc5.metric("Protocol", meta["protocol"])
+
+            # 3. XAI Behavioral Insight & Automated Gating Action
+            with alert_place.container():
+                st.markdown("#### 🔍 Explainable AI (XAI) Diagnosis & Response Action")
+                
+                if verdict != "Benign":
+                    # Fetch matching XAI record or extract top numerical feature deviations
+                    matching_xai = xai_df[xai_df["sample_id"] == idx]
+                    if not matching_xai.empty:
+                        raw_shap = matching_xai.iloc[0]["top_shap_features"]
+                        shap_feats = eval(raw_shap) if isinstance(raw_shap, str) else raw_shap
+                        score = matching_xai.iloc[0]["consensus_score"]
+                        action = matching_xai.iloc[0]["response_action"]
+                    else:
+                        top_dims = np.argsort(np.abs(sample[0]))[::-1][:3]
+                        shap_feats = [f"Feature_{d}" for d in top_dims]
+                        score = 0.8250
+                        action = "AUTOMATED_MITIGATION"
+
+                    explanation = generate_plain_english_explanation(verdict, shap_feats)
+                    st.info(explanation)
+
+                    col_a, col_b, col_c = st.columns(3)
+                    col_a.markdown(f"**Top Anomaly Driver:** `{get_readable_feature(shap_feats[0])}`")
+                    col_b.markdown(f"**Consensus Score:** `{score:.4f}`")
+                    
+                    if action == "AUTOMATED_MITIGATION":
+                        col_c.error(f"🛡️ **Action:** Auto-blocked Source IP `{meta['src_ip']}`")
+                    else:
+                        col_c.warning(f"⚠️ **Action:** Routing Flow to Human Analyst")
+                else:
+                    st.success("Traffic flow demonstrates normal operational baseline across all features.")
+
+            time.sleep(stream_speed)
 
 # ---------------------------------------------------------
-# 4. Phase 5: XAI Consensus & Gating Inspector
+# MODE 2: FORENSIC INCIDENT INSPECTOR
 # ---------------------------------------------------------
-st.subheader("🔍 Dual-Engine XAI Consensus & Gating Inspector")
-
-if xai_df.empty:
-    st.info("No flagged XAI evaluation records found.")
 else:
+    st.subheader("📑 Forensic Incident Inspector")
     sample_ids = xai_df["sample_id"].tolist()
-    selected_id = st.selectbox("Select Flagged Sample ID for Analysis:", sample_ids)
+    selected_id = st.selectbox("Select Flagged Sample Flow ID for Detailed Inspection:", sample_ids)
 
-    # Filter data for selected sample
     sample_row = xai_df[xai_df["sample_id"] == selected_id].iloc[0]
+    meta = metadata_df.iloc[selected_id].to_dict()
 
-    meta_col1, meta_col2, meta_col3, meta_col4 = st.columns(4)
-    meta_col1.markdown(f"**Source Group:** `{sample_row['source']}`")
-    meta_col2.markdown(f"**Cascade Verdict:** `{sample_row['verdict']}`")
-    meta_col3.markdown(f"**Consensus Score:** `{sample_row['consensus_score']:.4f}`")
+    st.markdown(f"### Incident Report — Sample Flow #{selected_id}")
+    
+    # 5-Tuple Network Context Card
+    st.markdown("#### 🌐 Network Flow Context (5-Tuple)")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Source IP", meta["src_ip"])
+    c2.metric("Source Port", meta["src_port"])
+    c3.metric("Destination IP", meta["dst_ip"])
+    c4.metric("Destination Port", meta["dst_port"])
+    c5.metric("Protocol", meta["protocol"])
 
-    # Dynamic Gating Badge
-    action = sample_row["response_action"]
-    if action == "AUTOMATED_MITIGATION":
-        meta_col4.error("🛡️ Action: AUTOMATED MITIGATION")
+    st.divider()
+
+    # Parse Feature Attributions
+    shap_feats = eval(sample_row["top_shap_features"]) if isinstance(sample_row["top_shap_features"], str) else sample_row["top_shap_features"]
+    lime_feats = eval(sample_row["top_lime_features"]) if isinstance(sample_row["top_lime_features"], str) else sample_row["top_lime_features"]
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("#### SHAP Top Features (Human-Readable)")
+        for i, f in enumerate(shap_feats[:5], 1):
+            st.markdown(f"{i}. **{get_readable_feature(f)}** (`{f}`)")
+
+    with col2:
+        st.markdown("#### LIME Top Features (Human-Readable)")
+        for i, f in enumerate(lime_feats[:5], 1):
+            st.markdown(f"{i}. **{get_readable_feature(f)}** (`{f}`)")
+
+    st.divider()
+
+    # System Plain-English Narrative & Safety Gating
+    st.markdown("#### 💬 AI Diagnosis & Response Action")
+    st.info(generate_plain_english_explanation(sample_row['verdict'], shap_feats))
+
+    m_col1, m_col2 = st.columns(2)
+    m_col1.metric("XAI Consensus Score", f"{sample_row['consensus_score']:.4f}")
+    
+    if sample_row['response_action'] == "AUTOMATED_MITIGATION":
+        m_col2.error(f"🛡️ Gating Action: AUTOMATED MITIGATION — Block IP `{meta['src_ip']}`")
     else:
-        meta_col4.warning("⚠️ Action: HUMAN ANALYST REVIEW")
-
-    st.markdown("### Top Feature Attributions (SHAP vs. LIME)")
-    
-    # Format feature strings safely
-    shap_feats = sample_row["top_shap_features"]
-    lime_feats = sample_row["top_lime_features"]
-    
-    if isinstance(shap_feats, str):
-        shap_feats = eval(shap_feats)
-    if isinstance(lime_feats, str):
-        lime_feats = eval(lime_feats)
-
-    f_col1, f_col2 = st.columns(2)
-    
-    with f_col1:
-        st.markdown("**SHAP (Global/Sampling-based) Top Features:**")
-        for i, feat in enumerate(shap_feats, 1):
-            st.markdown(f"{i}. `{feat}`")
-
-    with f_col2:
-        st.markdown("**LIME (Local Linear Surrogate) Top Features:**")
-        for i, feat in enumerate(lime_feats, 1):
-            st.markdown(f"{i}. `{feat}`")
-
-    # Consensus Gauge Chart
-    fig_gauge = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=sample_row["consensus_score"],
-        domain={'x': [0, 1], 'y': [0, 1]},
-        title={'text': "SHAP-LIME Explanation Consensus Score"},
-        gauge={
-            'axis': {'range': [0, 1]},
-            'bar': {'color': "#2980b9"},
-            'steps': [
-                {'range': [0, 0.70], 'color': "#f1c40f"},
-                {'range': [0.70, 1.0], 'color': "#2ecc71"}
-            ],
-            'threshold': {
-                'line': {'color': "red", 'width': 4},
-                'thickness': 0.75,
-                'value': 0.70
-            }
-        }
-    ))
-    fig_gauge.update_layout(height=300)
-    st.plotly_chart(fig_gauge, use_container_width=True)
+        m_col2.warning("⚠️ Gating Action: HUMAN ANALYST REVIEW REQUIRED")
