@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 import streamlit as st
-import plotly.express as px
 
 # ---------------------------------------------------------
 # Page Configuration
@@ -29,27 +28,35 @@ if "streaming" not in st.session_state:
     st.session_state.streaming = False
 
 # ---------------------------------------------------------
-# Feature Name Dictionary & Helpers
+# Complete CICIDS2017 Feature Mapping Dictionary (78 Features)
 # ---------------------------------------------------------
 FEATURE_MAP = {
-    "Feature_0": "Destination Port",
-    "Feature_1": "Flow Duration",
-    "Feature_2": "Total Fwd Packets",
-    "Feature_3": "Total Backward Packets",
-    "Feature_4": "Total Length of Fwd Packets",
-    "Feature_5": "Total Length of Bwd Packets",
-    "Feature_6": "Fwd Packet Length Max",
-    "Feature_7": "Fwd Packet Length Min",
-    "Feature_8": "Fwd Packet Length Mean",
-    "Feature_9": "Fwd Packet Length Std",
-    "Feature_10": "Bwd Packet Length Max",
-    "Feature_11": "Bwd Packet Length Min",
-    "Feature_12": "Bwd Packet Length Mean",
-    "Feature_13": "Bwd Packet Length Std",
-    "Feature_14": "Flow Bytes/s",
-    "Feature_15": "Flow Packets/s",
-    "Feature_50": "Subflow Fwd Bytes",
-    "Feature_51": "Subflow Fwd Packets"
+    "Feature_0": "Destination Port", "Feature_1": "Flow Duration", "Feature_2": "Total Fwd Packets",
+    "Feature_3": "Total Backward Packets", "Feature_4": "Total Length of Fwd Packets", "Feature_5": "Total Length of Bwd Packets",
+    "Feature_6": "Fwd Packet Length Max", "Feature_7": "Fwd Packet Length Min", "Feature_8": "Fwd Packet Length Mean",
+    "Feature_9": "Fwd Packet Length Std", "Feature_10": "Bwd Packet Length Max", "Feature_11": "Bwd Packet Length Min",
+    "Feature_12": "Bwd Packet Length Mean", "Feature_13": "Bwd Packet Length Std", "Feature_14": "Flow Bytes/s",
+    "Feature_15": "Flow Packets/s", "Feature_16": "Flow IAT Mean", "Feature_17": "Flow IAT Std",
+    "Feature_18": "Flow IAT Max", "Feature_19": "Flow IAT Min", "Feature_20": "Fwd IAT Total",
+    "Feature_21": "Fwd IAT Mean", "Feature_22": "Fwd IAT Std", "Feature_23": "Fwd IAT Max",
+    "Feature_24": "Fwd IAT Min", "Feature_25": "Bwd IAT Total", "Feature_26": "Bwd IAT Mean",
+    "Feature_27": "Bwd IAT Std", "Feature_28": "Bwd IAT Max", "Feature_29": "Bwd IAT Min",
+    "Feature_30": "Fwd PSH Flags", "Feature_31": "Bwd PSH Flags", "Feature_32": "Fwd URG Flags",
+    "Feature_33": "Bwd URG Flags", "Feature_34": "Fwd Header Length", "Feature_35": "Bwd Header Length",
+    "Feature_36": "Fwd Packets/s", "Feature_37": "Bwd Packets/s", "Feature_38": "Min Packet Length",
+    "Feature_39": "Max Packet Length", "Feature_40": "Packet Length Mean", "Feature_41": "Packet Length Std",
+    "Feature_42": "Packet Length Variance", "Feature_43": "FIN Flag Count", "Feature_44": "SYN Flag Count",
+    "Feature_45": "RST Flag Count", "Feature_46": "PSH Flag Count", "Feature_47": "ACK Flag Count",
+    "Feature_48": "URG Flag Count", "Feature_49": "CWE Flag Count", "Feature_50": "ECE Flag Count",
+    "Feature_51": "Down/Up Ratio", "Feature_52": "Average Packet Size", "Feature_53": "Avg Fwd Segment Size",
+    "Feature_54": "Avg Bwd Segment Size", "Feature_55": "Fwd Header Length.1", "Feature_56": "Fwd Avg Bytes/Bulk",
+    "Feature_57": "Fwd Avg Packets/Bulk", "Feature_58": "Fwd Avg Bulk Rate", "Feature_59": "Bwd Avg Bytes/Bulk",
+    "Feature_60": "Bwd Avg Packets/Bulk", "Feature_61": "Bwd Avg Bulk Rate", "Feature_62": "Subflow Fwd Packets",
+    "Feature_63": "Subflow Fwd Bytes", "Feature_64": "Subflow Bwd Packets", "Feature_65": "Subflow Bwd Bytes",
+    "Feature_66": "Init_Win_bytes_forward", "Feature_67": "Init_Win_bytes_backward", "Feature_68": "act_data_pkt_fwd",
+    "Feature_69": "min_seg_size_forward", "Feature_70": "Active Mean", "Feature_71": "Active Std",
+    "Feature_72": "Active Max", "Feature_73": "Active Min", "Feature_74": "Idle Mean",
+    "Feature_75": "Idle Std", "Feature_76": "Idle Max", "Feature_77": "Idle Min"
 }
 
 def get_readable_feature(feature_key):
@@ -61,9 +68,9 @@ def generate_plain_english_explanation(verdict, top_features):
     feats_list_str = ", ".join([f"`{f}`" for f in readable_feats])
     
     if verdict == "Known Attack":
-        return f"🚨 **Malicious Pattern:** Matched known attack signature. Primary key indicators: {feats_list_str}."
+        return f"🚨 **Malicious Pattern Detected:** Flow matched known attack signature. Primary feature drivers: {feats_list_str}."
     elif verdict == "Zero-Day Candidate":
-        return f"⚠️ **Zero-Day Anomaly:** High reconstruction error. Statistical anomalies in: {feats_list_str}."
+        return f"⚠️ **Zero-Day Anomaly Detected:** High Autoencoder reconstruction error. Statistical anomalies in: {feats_list_str}."
     else:
         return "✅ **Normal Flow:** Traffic within expected operational baseline."
 
@@ -120,22 +127,11 @@ X_demo, y_demo, source_demo, dnn_model, ae_model, threshold, xai_df = load_artif
 metadata_df = generate_network_metadata(len(X_demo))
 
 # ---------------------------------------------------------
-# Header & Navigation
+# Dashboard Header & Controls
 # ---------------------------------------------------------
-st.title("🛡️ SOC Threat Operations & Response Center")
+st.title("🛡️ Real-Time XAI Threat Operations Center")
 
-# Executive Metrics Top Bar
-col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-col_m1.metric("Total Incidents Logged", len(st.session_state.incident_log))
-col_m2.metric("Active Blocked IPs", len(st.session_state.blocked_ips))
-zero_days = len([i for i in st.session_state.incident_log if i['verdict'] == 'Zero-Day Candidate'])
-col_m3.metric("Zero-Day Candidates", zero_days)
-attacks = len([i for i in st.session_state.incident_log if i['verdict'] == 'Known Attack'])
-col_m4.metric("Known Attack Alerts", attacks)
-
-st.divider()
-
-st.sidebar.header("🕹️ Stream & System Controls")
+st.sidebar.header("🕹️ Stream Controls")
 stream_speed = st.sidebar.slider("Packet Stream Speed (s)", 0.2, 2.0, 0.5)
 
 if st.sidebar.button("▶️ Start Stream Engine"):
@@ -149,11 +145,43 @@ if st.sidebar.button("🗑️ Clear Incident Logs"):
     st.session_state.blocked_ips = set()
     st.rerun()
 
+# Dynamic Top Containers
+metrics_place = st.empty()
+banner_place = st.empty()
+table_place = st.empty()
+
+# ---------------------------------------------------------
+# Render UI Update Function
+# ---------------------------------------------------------
+def render_dashboard():
+    # Render Top Metrics
+    with metrics_place.container():
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        col_m1.metric("Total Incidents Logged", len(st.session_state.incident_log))
+        col_m2.metric("Active Blocked IPs", len(st.session_state.blocked_ips))
+        zero_days = len([i for i in st.session_state.incident_log if i['verdict'] == 'Zero-Day Candidate'])
+        col_m3.metric("Zero-Day Candidates", zero_days)
+        attacks = len([i for i in st.session_state.incident_log if i['verdict'] == 'Known Attack'])
+        col_m4.metric("Known Attack Alerts", attacks)
+        st.divider()
+
+    # Render Real-Time Table
+    with table_place.container():
+        st.subheader("📋 Recorded Threat Incidents (Real-Time Stream)")
+        if len(st.session_state.incident_log) == 0:
+            st.info("No threats logged yet. Click '▶️ Start Stream Engine' to process packet streams.")
+        else:
+            df_log = pd.DataFrame(st.session_state.incident_log)
+            st.dataframe(
+                df_log[["timestamp", "flow_idx", "src_ip", "dst_ip", "dst_port", "verdict", "consensus_score", "top_feature", "status"]],
+                use_container_width=True
+            )
+
+render_dashboard()
+
 # ---------------------------------------------------------
 # LIVE STREAM PROCESSING LOOP
 # ---------------------------------------------------------
-live_banner_place = st.empty()
-
 if st.session_state.streaming:
     idx = np.random.randint(0, len(X_demo))
     sample = X_demo[idx:idx+1]
@@ -169,7 +197,6 @@ if st.session_state.streaming:
     else:
         verdict = "Benign"
 
-    # If traffic is suspicious, append to persistent incident log
     if verdict != "Benign":
         matching_xai = xai_df[xai_df["sample_id"] == idx]
         if not matching_xai.empty:
@@ -183,14 +210,12 @@ if st.session_state.streaming:
             score = 0.8120
             action = "AUTOMATED_MITIGATION"
 
-        # Auto-block high confidence threats
         if action == "AUTOMATED_MITIGATION":
             st.session_state.blocked_ips.add(meta['src_ip'])
             status = "Auto-Blocked"
         else:
             status = "Pending Review"
 
-        # Add to history if not already recorded
         incident_record = {
             "timestamp": time.strftime("%H:%M:%S"),
             "flow_idx": idx,
@@ -206,116 +231,58 @@ if st.session_state.streaming:
             "shap_feats": shap_feats
         }
         
-        # Deduplicate & push to front of state list
         st.session_state.incident_log.insert(0, incident_record)
 
-    with live_banner_place.container():
+    with banner_place.container():
         if verdict == "Benign":
-            st.caption(f"📡 Processing Live Packet #{idx} — Status: Normal ({meta['src_ip']} ➔ {meta['dst_ip']})")
+            st.caption(f"📡 Processing Flow #{idx} — Status: Normal ({meta['src_ip']} ➔ {meta['dst_ip']})")
         else:
-            st.error(f"🚨 ALERT DETECTED! Flow #{idx} [{verdict}] from {meta['src_ip']} — Added to Incident History Log.")
+            st.error(f"🚨 ALERT! Flow #{idx} [{verdict}] from {meta['src_ip']} — Added to Live Table.")
 
+    render_dashboard()
     time.sleep(stream_speed)
     st.rerun()
 
 # ---------------------------------------------------------
-# PERSISTENT SOC DASHBOARD PANELS
+# INTERACTIVE ANALYST INVESTIGATION PANEL
 # ---------------------------------------------------------
-tab_log, tab_actions, tab_blocklist = st.tabs([
-    "📑 Persistent Threat History Log", 
-    "🛠️ Active Analyst Decision Center", 
-    "🛡️ Live Firewall Blocklist"
-])
+st.divider()
+st.subheader("🔍 Incident Investigation & Response Panel")
 
-# ---------------------------------------------------------
-# TAB 1: PERSISTENT THREAT HISTORY LOG
-# ---------------------------------------------------------
-with tab_log:
-    st.subheader("📋 Recorded Threat Incidents")
-    if len(st.session_state.incident_log) == 0:
-        st.info("No threats logged yet. Click '▶️ Start Stream Engine' in the sidebar to begin processing traffic.")
-    else:
-        df_log = pd.DataFrame(st.session_state.incident_log)
-        st.dataframe(
-            df_log[["timestamp", "flow_idx", "src_ip", "dst_ip", "dst_port", "verdict", "consensus_score", "top_feature", "status"]],
-            use_container_width=True
-        )
-
-# ---------------------------------------------------------
-# TAB 2: ACTIVE ANALYST DECISION CENTER
-# ---------------------------------------------------------
-with tab_actions:
-    st.subheader("🔍 Incident Investigation & Response Panel")
+if len(st.session_state.incident_log) > 0:
+    incident_options = [f"#{i['flow_idx']} - {i['verdict']} ({i['src_ip']}) @ {i['timestamp']}" for i in st.session_state.incident_log]
+    selected_option = st.selectbox("Select Incident to Investigate:", incident_options)
     
-    if len(st.session_state.incident_log) == 0:
-        st.info("No active incidents to review.")
-    else:
-        # Select incident from logged history
-        incident_options = [f"#{i['flow_idx']} - {i['verdict']} ({i['src_ip']}) @ {i['timestamp']}" for i in st.session_state.incident_log]
-        selected_option = st.selectbox("Select Incident from Log History:", incident_options)
-        
-        selected_idx = int(selected_option.split(" ")[0].replace("#", ""))
-        inc = next(item for item in st.session_state.incident_log if item["flow_idx"] == selected_idx)
+    selected_idx = int(selected_option.split(" ")[0].replace("#", ""))
+    inc = next(item for item in st.session_state.incident_log if item["flow_idx"] == selected_idx)
 
-        st.markdown(f"### Incident Report: Flow #{inc['flow_idx']}")
-        
-        # 5-Tuple Context Card
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Source IP", inc["src_ip"])
-        c2.metric("Source Port", inc["src_port"])
-        c3.metric("Destination IP", inc["dst_ip"])
-        c4.metric("Destination Port", inc["dst_port"])
-        c5.metric("Protocol", inc["protocol"])
+    st.markdown(f"### Incident Details: Flow #{inc['flow_idx']}")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Source IP", inc["src_ip"])
+    c2.metric("Source Port", inc["src_port"])
+    c3.metric("Destination IP", inc["dst_ip"])
+    c4.metric("Destination Port", inc["dst_port"])
+    c5.metric("Protocol", inc["protocol"])
 
-        st.divider()
+    st.markdown("#### 💬 XAI Diagnosis")
+    st.warning(generate_plain_english_explanation(inc["verdict"], inc["shap_feats"]))
 
-        # Explanation Section
-        st.markdown("#### 💬 XAI Plain-English Diagnosis")
-        st.warning(generate_plain_english_explanation(inc["verdict"], inc["shap_feats"]))
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.write(f"**XAI Consensus Score:** `{inc['consensus_score']:.4f}`")
+        st.write(f"**Primary Driver:** `{inc['top_feature']}`")
+        st.write(f"**Status:** `{inc['status']}`")
 
-        col_left, col_right = st.columns(2)
-        with col_left:
-            st.write(f"**Consensus Agreement Score:** `{inc['consensus_score']:.4f}`")
-            st.write(f"**Primary Anomaly Driver:** `{inc['top_feature']}`")
-            st.write(f"**Current Status:** `{inc['status']}`")
-
-        # Interactive Action Buttons
-        with col_right:
-            st.markdown("#### ⚙️ Take Response Action")
-            
-            act_col1, act_col2, act_col3 = st.columns(3)
-            
-            if act_col1.button("🛡️ Block IP"):
-                st.session_state.blocked_ips.add(inc["src_ip"])
-                inc["status"] = "Analyst-Blocked"
-                st.success(f"IP {inc['src_ip']} added to Firewall Blocklist!")
-                st.rerun()
-
-            if act_col2.button("🟡 Quarantine"):
-                inc["status"] = "Quarantined"
-                st.warning(f"Flow #{inc['flow_idx']} placed in isolated VLAN sandbox.")
-                st.rerun()
-
-            if act_col3.button("✅ Dismiss"):
-                inc["status"] = "Dismissed (False Positive)"
-                st.info(f"Incident #{inc['flow_idx']} marked as False Positive.")
-                st.rerun()
-
-# ---------------------------------------------------------
-# TAB 3: FIREWALL BLOCKLIST TRACKER
-# ---------------------------------------------------------
-with tab_blocklist:
-    st.subheader("🛡️ Active Firewall Blocklist")
-    if len(st.session_state.blocked_ips) == 0:
-        st.info("No IP addresses are currently blocked.")
-    else:
-        st.write("The following IP addresses have been blocked by Automated Safety Gating or Manual Analyst Interventions:")
-        
-        block_df = pd.DataFrame(list(st.session_state.blocked_ips), columns=["Blocked IP Address"])
-        st.table(block_df)
-        
-        unblock_ip = st.selectbox("Select IP to Unblock:", list(st.session_state.blocked_ips))
-        if st.button("🔓 Unblock Selected IP"):
-            st.session_state.blocked_ips.remove(unblock_ip)
-            st.success(f"Removed {unblock_ip} from blocklist.")
+    with col_r:
+        st.markdown("#### ⚙️ Manual Actions")
+        b1, b2, b3 = st.columns(3)
+        if b1.button("🛡️ Block IP"):
+            st.session_state.blocked_ips.add(inc["src_ip"])
+            inc["status"] = "Analyst-Blocked"
+            st.rerun()
+        if b2.button("🟡 Quarantine"):
+            inc["status"] = "Quarantined"
+            st.rerun()
+        if b3.button("✅ Dismiss"):
+            inc["status"] = "Dismissed"
             st.rerun()
