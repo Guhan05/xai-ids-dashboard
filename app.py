@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import joblib
 import numpy as np
 import pandas as pd
@@ -26,6 +27,8 @@ if "blocked_ips" not in st.session_state:
 
 if "streaming" not in st.session_state:
     st.session_state.streaming = False
+
+INCIDENT_FILE = "live_incidents.json"
 
 # ---------------------------------------------------------
 # Complete CICIDS2017 Feature Mapping Dictionary (78 Features)
@@ -68,7 +71,7 @@ def generate_plain_english_explanation(verdict, top_features):
     feats_list_str = ", ".join([f"`{f}`" for f in readable_feats])
     
     if verdict == "Known Attack":
-        return f"🚨 **Malicious Pattern Detected:** Flow matched known attack signature. Primary feature drivers: {feats_list_str}."
+        return f"🚨 **Malicious Pattern Detected:** Flow matched known attack signature. Primary key indicators: {feats_list_str}."
     elif verdict == "Zero-Day Candidate":
         return f"⚠️ **Zero-Day Anomaly Detected:** High Autoencoder reconstruction error. Statistical anomalies in: {feats_list_str}."
     else:
@@ -131,8 +134,13 @@ metadata_df = generate_network_metadata(len(X_demo))
 # ---------------------------------------------------------
 st.title("🛡️ Real-Time XAI Threat Operations Center")
 
-st.sidebar.header("🕹️ Stream Controls")
-stream_speed = st.sidebar.slider("Packet Stream Speed (s)", 0.2, 2.0, 0.5)
+st.sidebar.header("🕹️ Stream Engine Controls")
+engine_source = st.sidebar.radio(
+    "Data Input Mode",
+    ["Local Packet Capture (live_sniffer.py)", "Demo Stream Simulator"]
+)
+
+stream_speed = st.sidebar.slider("Simulation Speed (s)", 0.2, 2.0, 0.5)
 
 if st.sidebar.button("▶️ Start Stream Engine"):
     st.session_state.streaming = True
@@ -143,18 +151,33 @@ if st.sidebar.button("⏹️ Pause Stream"):
 if st.sidebar.button("🗑️ Clear Incident Logs"):
     st.session_state.incident_log = []
     st.session_state.blocked_ips = set()
+    if os.path.exists(INCIDENT_FILE):
+        os.remove(INCIDENT_FILE)
     st.rerun()
 
-# Dynamic Top Containers
+# Dynamic Containers
 metrics_place = st.empty()
 banner_place = st.empty()
 table_place = st.empty()
 
 # ---------------------------------------------------------
-# Render UI Update Function
+# UI Render Function
 # ---------------------------------------------------------
 def render_dashboard():
-    # Render Top Metrics
+    # Sync live_incidents.json if local sniffer is running
+    if os.path.exists(INCIDENT_FILE):
+        try:
+            with open(INCIDENT_FILE, "r") as f:
+                live_file_data = json.load(f)
+                for item in live_file_data:
+                    if not any(i.get("timestamp") == item["timestamp"] and i.get("src_ip") == item["src_ip"] for i in st.session_state.incident_log):
+                        item["status"] = "Pending Review"
+                        item["shap_feats"] = [item.get("top_feature", "Feature_0")]
+                        st.session_state.incident_log.insert(0, item)
+        except Exception:
+            pass
+
+    # Top Metrics
     with metrics_place.container():
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m1.metric("Total Incidents Logged", len(st.session_state.incident_log))
@@ -165,79 +188,82 @@ def render_dashboard():
         col_m4.metric("Known Attack Alerts", attacks)
         st.divider()
 
-    # Render Real-Time Table
+    # Real-Time Incident Table
     with table_place.container():
         st.subheader("📋 Recorded Threat Incidents (Real-Time Stream)")
         if len(st.session_state.incident_log) == 0:
-            st.info("No threats logged yet. Click '▶️ Start Stream Engine' to process packet streams.")
+            st.info("No threats logged yet. Start `live_sniffer.py` or enable 'Demo Stream Simulator'.")
         else:
             df_log = pd.DataFrame(st.session_state.incident_log)
-            st.dataframe(
-                df_log[["timestamp", "flow_idx", "src_ip", "dst_ip", "dst_port", "verdict", "consensus_score", "top_feature", "status"]],
-                use_container_width=True
-            )
+            cols = [c for c in ["timestamp", "flow_idx", "src_ip", "dst_ip", "dst_port", "verdict", "consensus_score", "top_feature", "status"] if c in df_log.columns]
+            st.dataframe(df_log[cols], use_container_width=True)
 
 render_dashboard()
 
 # ---------------------------------------------------------
-# LIVE STREAM PROCESSING LOOP
+# LIVE STREAM PROCESSING LOOP (SIMULATION MODE)
 # ---------------------------------------------------------
 if st.session_state.streaming:
-    idx = np.random.randint(0, len(X_demo))
-    sample = X_demo[idx:idx+1]
-    meta = metadata_df.iloc[idx].to_dict()
+    if engine_source == "Demo Stream Simulator":
+        idx = np.random.randint(0, len(X_demo))
+        sample = X_demo[idx:idx+1]
+        meta = metadata_df.iloc[idx].to_dict()
 
-    recon_err = float(np.mean(np.square(sample - ae_model.predict(sample, verbose=0))))
-    dnn_prob = float(dnn_model.predict(sample, verbose=0).ravel()[0])
+        recon_err = float(np.mean(np.square(sample - ae_model.predict(sample, verbose=0))))
+        dnn_prob = float(dnn_model.predict(sample, verbose=0).ravel()[0])
 
-    if dnn_prob > 0.5:
-        verdict = "Known Attack"
-    elif recon_err > threshold:
-        verdict = "Zero-Day Candidate"
-    else:
-        verdict = "Benign"
-
-    if verdict != "Benign":
-        matching_xai = xai_df[xai_df["sample_id"] == idx]
-        if not matching_xai.empty:
-            raw_shap = matching_xai.iloc[0]["top_shap_features"]
-            shap_feats = eval(raw_shap) if isinstance(raw_shap, str) else raw_shap
-            score = float(matching_xai.iloc[0]["consensus_score"])
-            action = matching_xai.iloc[0]["response_action"]
+        if dnn_prob > 0.5:
+            verdict = "Known Attack"
+        elif recon_err > threshold:
+            verdict = "Zero-Day Candidate"
         else:
-            top_dims = np.argsort(np.abs(sample[0]))[::-1][:3]
-            shap_feats = [f"Feature_{d}" for d in top_dims]
-            score = 0.8120
-            action = "AUTOMATED_MITIGATION"
+            verdict = "Benign"
 
-        if action == "AUTOMATED_MITIGATION":
-            st.session_state.blocked_ips.add(meta['src_ip'])
-            status = "Auto-Blocked"
-        else:
-            status = "Pending Review"
+        if verdict != "Benign":
+            matching_xai = xai_df[xai_df["sample_id"] == idx]
+            if not matching_xai.empty:
+                raw_shap = matching_xai.iloc[0]["top_shap_features"]
+                shap_feats = eval(raw_shap) if isinstance(raw_shap, str) else raw_shap
+                score = float(matching_xai.iloc[0]["consensus_score"])
+                action = matching_xai.iloc[0]["response_action"]
+            else:
+                top_dims = np.argsort(np.abs(sample[0]))[::-1][:3]
+                shap_feats = [f"Feature_{d}" for d in top_dims]
+                score = 0.8120
+                action = "AUTOMATED_MITIGATION"
 
-        incident_record = {
-            "timestamp": time.strftime("%H:%M:%S"),
-            "flow_idx": idx,
-            "src_ip": meta['src_ip'],
-            "src_port": meta['src_port'],
-            "dst_ip": meta['dst_ip'],
-            "dst_port": meta['dst_port'],
-            "protocol": meta['protocol'],
-            "verdict": verdict,
-            "consensus_score": score,
-            "top_feature": get_readable_feature(shap_feats[0]),
-            "status": status,
-            "shap_feats": shap_feats
-        }
-        
-        st.session_state.incident_log.insert(0, incident_record)
+            if action == "AUTOMATED_MITIGATION":
+                st.session_state.blocked_ips.add(meta['src_ip'])
+                status = "Auto-Blocked"
+            else:
+                status = "Pending Review"
 
-    with banner_place.container():
-        if verdict == "Benign":
-            st.caption(f"📡 Processing Flow #{idx} — Status: Normal ({meta['src_ip']} ➔ {meta['dst_ip']})")
-        else:
-            st.error(f"🚨 ALERT! Flow #{idx} [{verdict}] from {meta['src_ip']} — Added to Live Table.")
+            incident_record = {
+                "timestamp": time.strftime("%H:%M:%S"),
+                "flow_idx": idx,
+                "src_ip": meta['src_ip'],
+                "src_port": meta['src_port'],
+                "dst_ip": meta['dst_ip'],
+                "dst_port": meta['dst_port'],
+                "protocol": meta['protocol'],
+                "verdict": verdict,
+                "consensus_score": score,
+                "top_feature": get_readable_feature(shap_feats[0]),
+                "status": status,
+                "shap_feats": shap_feats
+            }
+            
+            st.session_state.incident_log.insert(0, incident_record)
+
+        with banner_place.container():
+            if verdict == "Benign":
+                st.caption(f"📡 Processing Flow #{idx} — Status: Normal ({meta['src_ip']} ➔ {meta['dst_ip']})")
+            else:
+                st.error(f"🚨 ALERT! Flow #{idx} [{verdict}] from {meta['src_ip']} — Added to Live Table.")
+
+    else: # Local Packet Capture Mode
+        with banner_place.container():
+            st.caption("📡 Listening for live packets via `live_incidents.json` from `live_sniffer.py`...")
 
     render_dashboard()
     time.sleep(stream_speed)
@@ -250,28 +276,32 @@ st.divider()
 st.subheader("🔍 Incident Investigation & Response Panel")
 
 if len(st.session_state.incident_log) > 0:
-    incident_options = [f"#{i['flow_idx']} - {i['verdict']} ({i['src_ip']}) @ {i['timestamp']}" for i in st.session_state.incident_log]
+    incident_options = [
+        f"Flow #{i.get('flow_idx', 0)} - {i['verdict']} ({i['src_ip']}) @ {i['timestamp']}"
+        for i in st.session_state.incident_log
+    ]
     selected_option = st.selectbox("Select Incident to Investigate:", incident_options)
     
-    selected_idx = int(selected_option.split(" ")[0].replace("#", ""))
-    inc = next(item for item in st.session_state.incident_log if item["flow_idx"] == selected_idx)
+    selected_ts = selected_option.split(" @ ")[-1]
+    inc = next(item for item in st.session_state.incident_log if item["timestamp"] == selected_ts)
 
-    st.markdown(f"### Incident Details: Flow #{inc['flow_idx']}")
+    st.markdown(f"### Incident Details: {inc['verdict']} ({inc['src_ip']})")
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Source IP", inc["src_ip"])
-    c2.metric("Source Port", inc["src_port"])
-    c3.metric("Destination IP", inc["dst_ip"])
-    c4.metric("Destination Port", inc["dst_port"])
-    c5.metric("Protocol", inc["protocol"])
+    c1.metric("Source IP", inc.get("src_ip", "Unknown"))
+    c2.metric("Source Port", inc.get("src_port", "N/A"))
+    c3.metric("Destination IP", inc.get("dst_ip", "Unknown"))
+    c4.metric("Destination Port", inc.get("dst_port", "N/A"))
+    c5.metric("Protocol", inc.get("protocol", "TCP"))
 
     st.markdown("#### 💬 XAI Diagnosis")
-    st.warning(generate_plain_english_explanation(inc["verdict"], inc["shap_feats"]))
+    shap_f = inc.get("shap_feats", [inc.get("top_feature", "Feature_0")])
+    st.warning(generate_plain_english_explanation(inc["verdict"], shap_f))
 
     col_l, col_r = st.columns(2)
     with col_l:
-        st.write(f"**XAI Consensus Score:** `{inc['consensus_score']:.4f}`")
-        st.write(f"**Primary Driver:** `{inc['top_feature']}`")
-        st.write(f"**Status:** `{inc['status']}`")
+        st.write(f"**XAI Consensus Score:** `{inc.get('consensus_score', 0.85):.4f}`")
+        st.write(f"**Primary Driver:** `{inc.get('top_feature', 'Unknown')}`")
+        st.write(f"**Status:** `{inc.get('status', 'Pending Review')}`")
 
     with col_r:
         st.markdown("#### ⚙️ Manual Actions")
